@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a change within the documented experimental scope.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-device support, production authentication, OS login, and compatibility claims are outside the current milestone.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete problem or limitation this would address.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible behavior and any format or policy implications.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security consideration
+      options:
+        - label: I considered whether this change could expose biometric payloads, identifiers, or secrets.
+          required: true

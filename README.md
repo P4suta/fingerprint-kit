@@ -1,6 +1,8 @@
 # fingerprint-kit
 
 [![CI](https://github.com/P4suta/fingerprint-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/P4suta/fingerprint-kit/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/P4suta/fingerprint-kit/actions/workflows/codeql.yml/badge.svg)](https://github.com/P4suta/fingerprint-kit/actions/workflows/codeql.yml)
+[![RustSec](https://github.com/P4suta/fingerprint-kit/actions/workflows/security-audit.yml/badge.svg)](https://github.com/P4suta/fingerprint-kit/actions/workflows/security-audit.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 `fingerprint-kit` 0.1.0 is a hardware-free, experimental Rust 2024 vertical slice for fingerprint
