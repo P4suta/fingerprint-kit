@@ -1,8 +1,8 @@
 //! The match-on-chip seam.
 //!
-//! [`CaptureSource`](crate::source) covers sensors that stream pixels: the host receives an image,
-//! extracts minutiae, and decides. This module covers the other archetype, where the sensor holds
-//! the matcher. The host never sees a finger — it receives an opaque template it cannot read, and
+//! The capture seam covers sensors that stream pixels: the host receives an image, extracts
+//! minutiae, and decides. This module covers the other archetype, where the sensor holds the
+//! matcher. The host never sees a finger — it receives an opaque template it cannot read, and
 //! hands that template back at verification time for the device to compare against a live scan.
 //!
 //! The trust boundary is inverted, so the shape of the API is too. There is no image, no minutiae,
