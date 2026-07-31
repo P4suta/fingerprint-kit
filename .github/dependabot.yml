@@ -8,6 +8,10 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
@@ -17,3 +21,6 @@ updates:
       github-actions:
         patterns:
           - "*"
+    ignore:
+      # Keep this aligned with rust-toolchain.toml and the documented MSRV.
+      - dependency-name: dtolnay/rust-toolchain
