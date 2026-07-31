@@ -190,9 +190,9 @@ impl fmt::Debug for TemplateSample {
     }
 }
 
-/// Explicit version-1 template domain record.
+/// A host-image template: the host holds the pixels, extracts minutiae, and does the matching.
 #[derive(Clone, PartialEq, Eq)]
-pub struct TemplateRecord {
+pub struct HostImageTemplate {
     /// Template schema major version.
     pub schema_major: u32,
     /// Extraction/matching engine identifier.
@@ -207,10 +207,10 @@ pub struct TemplateRecord {
     pub samples: Vec<TemplateSample>,
 }
 
-impl fmt::Debug for TemplateRecord {
+impl fmt::Debug for HostImageTemplate {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TemplateRecord")
+            .debug_struct("HostImageTemplate")
             .field("schema_major", &self.schema_major)
             .field("engine_id", &self.engine_id)
             .field("engine_version", &self.engine_version)
@@ -224,7 +224,88 @@ impl fmt::Debug for TemplateRecord {
     }
 }
 
-/// Result of one fixed-policy verification.
+/// Upper bound on one device-held template blob, before base64 expansion.
+///
+/// A match-on-chip blob is small by nature: the sensor keeps the biometric and hands the host a
+/// reference it cannot interpret. A UPEK TouchStrip returns 241 bytes. The bound is set far above
+/// that so other match-on-chip families fit, and it still leaves the base64 form well inside the
+/// template file's own 1 MiB limit.
+pub const MAX_DEVICE_TEMPLATE_BYTES: usize = 64 * 1024;
+
+/// A match-on-chip template: an opaque blob the device produced and only the device can read.
+///
+/// This is the inverse of [`HostImageTemplate`]. No minutiae, no quality, and no score — the host
+/// stores the blob and hands it back for the sensor to compare against a live finger, so there is
+/// nothing here for a host-side matcher to act on. `driver_id` and `device_profile_id` record
+/// where the blob came from, because a blob is meaningless to any other driver or model.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceTemplate {
+    /// Template schema major version.
+    pub schema_major: u32,
+    /// The driver that produced the blob. A blob is not portable across drivers.
+    pub driver_id: String,
+    /// The device model that produced the blob.
+    pub device_profile_id: String,
+    /// Experimental fixed matching policy name.
+    pub policy: String,
+    /// The device's own template. Opaque here, and sensitive biometric data.
+    pub blob: Vec<u8>,
+}
+
+impl fmt::Debug for DeviceTemplate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceTemplate")
+            .field("schema_major", &self.schema_major)
+            .field("driver_id", &self.driver_id)
+            .field("device_profile_id", &self.device_profile_id)
+            .field("policy", &self.policy)
+            .field(
+                "blob",
+                &format_args!("<{} bytes redacted>", self.blob.len()),
+            )
+            .finish()
+    }
+}
+
+/// A stored template, discriminated by where the matching happens.
+///
+/// The two arms are deliberately not merged into one struct with optional fields. Their policies,
+/// their validation rules, and the very question they answer are disjoint, and an enum makes the
+/// mismatches unrepresentable: a match-on-chip template cannot carry minutiae to be scored against
+/// the NBIS threshold, and a host-image template cannot be smuggled to a sensor as a device blob.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TemplateRecord {
+    /// Matching runs on the host over NBIS minutiae.
+    HostImage(HostImageTemplate),
+    /// Matching runs on the sensor over its own opaque template.
+    MatchOnChip(DeviceTemplate),
+}
+
+impl TemplateRecord {
+    /// The schema major version this record declares, whichever arm it is.
+    #[must_use]
+    pub const fn schema_major(&self) -> u32 {
+        match self {
+            Self::HostImage(template) => template.schema_major,
+            Self::MatchOnChip(template) => template.schema_major,
+        }
+    }
+
+    /// The matching policy this record declares, whichever arm it is.
+    #[must_use]
+    pub fn policy(&self) -> &str {
+        match self {
+            Self::HostImage(template) => &template.policy,
+            Self::MatchOnChip(template) => &template.policy,
+        }
+    }
+}
+
+/// Result of one host-side, fixed-policy verification.
+///
+/// Only the host-image path produces this. A match-on-chip sensor reports [`MatchVerdict`]
+/// instead, because it exposes no score and no threshold to compare one against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerificationResult {
     /// Maximum BOZORTH3 score across enrollment samples.
@@ -235,6 +316,17 @@ pub struct VerificationResult {
     pub matched: bool,
     /// Probe's mean MINDTCT minutia quality.
     pub probe_quality: u8,
+}
+
+/// Result of one on-device comparison.
+///
+/// Deliberately just the verdict. The sensor decides, using a threshold and a scoring function it
+/// does not publish, so inventing a host-side score here would be fabricating precision the device
+/// never reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchVerdict {
+    /// Whether the device recognised the presented finger.
+    pub matched: bool,
 }
 
 #[cfg(test)]
@@ -280,16 +372,56 @@ mod tests {
         assert!(rendered_sample.contains("<1 redacted>"));
         assert!(!rendered_sample.contains("x: 11"));
 
-        let template = TemplateRecord {
-            schema_major: 1,
+        let template = TemplateRecord::HostImage(HostImageTemplate {
+            schema_major: 2,
             engine_id: "engine".to_owned(),
             engine_version: "version".to_owned(),
             capture_profile_id: "profile".to_owned(),
             policy: "policy".to_owned(),
             samples: vec![sample],
-        };
+        });
         let rendered_template = format!("{template:?}");
         assert!(rendered_template.contains("<1 redacted>"));
         assert!(!rendered_template.contains("x: 11"));
+    }
+
+    #[test]
+    fn debug_redacts_the_device_template_blob() {
+        // The blob is the whole biometric on a match-on-chip sensor, so it gets the same
+        // treatment as pixels and minutiae: length only, never content.
+        let template = DeviceTemplate {
+            schema_major: 2,
+            driver_id: "driver".to_owned(),
+            device_profile_id: "profile".to_owned(),
+            policy: "policy".to_owned(),
+            blob: vec![0xAB, 0xCD, 0xEF],
+        };
+        let rendered = format!("{template:?}");
+        assert!(rendered.contains("<3 bytes redacted>"));
+        assert!(!rendered.contains("171"));
+        assert!(!rendered.contains("AB"));
+    }
+
+    #[test]
+    fn template_record_exposes_the_common_fields_from_either_arm() {
+        let host = TemplateRecord::HostImage(HostImageTemplate {
+            schema_major: 2,
+            engine_id: String::new(),
+            engine_version: String::new(),
+            capture_profile_id: String::new(),
+            policy: "host-policy".to_owned(),
+            samples: Vec::new(),
+        });
+        let device = TemplateRecord::MatchOnChip(DeviceTemplate {
+            schema_major: 2,
+            driver_id: String::new(),
+            device_profile_id: String::new(),
+            policy: "device-policy".to_owned(),
+            blob: Vec::new(),
+        });
+        assert_eq!(host.schema_major(), 2);
+        assert_eq!(device.schema_major(), 2);
+        assert_eq!(host.policy(), "host-policy");
+        assert_eq!(device.policy(), "device-policy");
     }
 }

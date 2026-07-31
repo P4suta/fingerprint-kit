@@ -15,6 +15,8 @@ pub const PROTOCOL_VERSION: u32 = 0;
 pub const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum decoded frame size.
 pub const MAX_DECODED_FRAME_BYTES: usize = 1024 * 1024;
+/// Maximum decoded device-template size, matching the domain's own bound.
+pub const MAX_DECODED_TEMPLATE_BYTES: usize = crate::MAX_DEVICE_TEMPLATE_BYTES;
 const MAX_TRACKED_IDENTIFIERS: usize = 4096;
 
 /// Host-to-driver JSON Lines message.
@@ -41,6 +43,26 @@ pub enum Request {
         operation_id: String,
         /// Driver-defined device identifier.
         device_id: String,
+    },
+    /// Start one enrollment on a match-on-chip device.
+    StartEnroll {
+        /// Unique request identifier.
+        request_id: String,
+        /// Operation identifier shared by enrollment events.
+        operation_id: String,
+        /// Driver-defined device identifier.
+        device_id: String,
+    },
+    /// Ask a match-on-chip device to compare a live finger against a template it produced.
+    StartVerify {
+        /// Unique request identifier.
+        request_id: String,
+        /// Operation identifier shared by verification events.
+        operation_id: String,
+        /// Driver-defined device identifier.
+        device_id: String,
+        /// The device's own template, standard-alphabet padded base64.
+        template_base64: String,
     },
     /// Cancel the active operation.
     Cancel {
@@ -71,6 +93,8 @@ impl Request {
             Self::Hello { .. } => "hello",
             Self::Enumerate { .. } => "enumerate",
             Self::StartCapture { .. } => "start_capture",
+            Self::StartEnroll { .. } => "start_enroll",
+            Self::StartVerify { .. } => "start_verify",
             Self::Cancel { .. } => "cancel",
             Self::Shutdown { .. } => "shutdown",
         }
@@ -81,6 +105,8 @@ impl Request {
             Self::Hello { request_id, .. }
             | Self::Enumerate { request_id }
             | Self::StartCapture { request_id, .. }
+            | Self::StartEnroll { request_id, .. }
+            | Self::StartVerify { request_id, .. }
             | Self::Cancel { request_id, .. }
             | Self::Shutdown { request_id } => request_id,
         }
@@ -88,10 +114,30 @@ impl Request {
 
     fn started_operation_id(&self) -> Option<&str> {
         match self {
-            Self::StartCapture { operation_id, .. } => Some(operation_id),
+            Self::StartCapture { operation_id, .. }
+            | Self::StartEnroll { operation_id, .. }
+            | Self::StartVerify { operation_id, .. } => Some(operation_id),
             _ => None,
         }
     }
+
+    /// Which kind of operation this request starts, if it starts one.
+    fn starts(&self) -> Option<OperationKind> {
+        match self {
+            Self::StartCapture { .. } => Some(OperationKind::Capture),
+            Self::StartEnroll { .. } => Some(OperationKind::Enroll),
+            Self::StartVerify { .. } => Some(OperationKind::Verify),
+            _ => None,
+        }
+    }
+}
+
+/// What an active operation is doing, which decides the events that may follow `Started`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationKind {
+    Capture,
+    Enroll,
+    Verify,
 }
 
 /// One enumerated experimental device.
@@ -102,6 +148,24 @@ pub struct DeviceInfo {
     pub device_id: String,
     /// Capture profile emitted by the device.
     pub capture_profile_id: String,
+    /// Where this device does its matching, which decides what operations it can serve.
+    pub capability: DeviceCapability,
+    /// Presentations a full enrollment needs. `0` where the device does not enroll.
+    pub enroll_stages: u32,
+}
+
+/// Where a device does its matching.
+///
+/// This is not decoration: the two are disjoint interaction models. A host-image device answers
+/// [`Request::StartCapture`] with pixels and knows nothing about templates; a match-on-chip device
+/// answers [`Request::StartEnroll`]/[`Request::StartVerify`] and never emits a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceCapability {
+    /// Streams frames to the host, which extracts and matches.
+    HostImage,
+    /// Enrolls and matches internally, exchanging opaque templates.
+    MatchOnChip,
 }
 
 /// Driver-to-host JSON Lines message.
@@ -156,6 +220,37 @@ pub enum Response {
         /// Active operation identifier.
         operation_id: String,
     },
+    /// One enrollment stage was accepted.
+    ///
+    /// **A driver need not report the final stage.** libfprint's `upekts` reports a stage only once
+    /// the following poll asks for another presentation, so the poll after the last presentation is
+    /// "complete" and reports nothing: a 3-stage enrollment emits two of these. A host waiting for
+    /// `completed_stages == total_stages` hangs. [`Response::Enrolled`] is the completion signal.
+    EnrollProgress {
+        /// Active operation identifier.
+        operation_id: String,
+        /// Stages accepted so far.
+        completed_stages: u32,
+        /// Stages a full enrollment needs.
+        total_stages: u32,
+    },
+    /// Enrollment produced the device's own template.
+    Enrolled {
+        /// Active operation identifier.
+        operation_id: String,
+        /// The device's opaque template, standard-alphabet padded base64.
+        template_base64: String,
+    },
+    /// The device compared a live finger against a template and reached a verdict.
+    ///
+    /// Carries no score: the sensor does not publish one, and inventing a host-side number here
+    /// would be fabricating precision the device never reported.
+    MatchResult {
+        /// Active operation identifier.
+        operation_id: String,
+        /// Whether the device recognised the finger.
+        matched: bool,
+    },
     /// Capture completed successfully.
     Completed {
         /// Completed operation identifier.
@@ -199,11 +294,57 @@ impl Response {
             Self::FingerPresent { .. } => "finger_present",
             Self::Frame { .. } => "frame",
             Self::FingerRemoved { .. } => "finger_removed",
+            Self::EnrollProgress { .. } => "enroll_progress",
+            Self::Enrolled { .. } => "enrolled",
+            Self::MatchResult { .. } => "match_result",
             Self::Completed { .. } => "completed",
             Self::Cancelled { .. } => "cancelled",
             Self::Error { .. } => "error",
         }
     }
+}
+
+/// Base64-encode a device template after enforcing the template limit.
+pub fn encode_template_data(template: &[u8]) -> Result<String> {
+    if template.is_empty() {
+        return Err(Error::invalid("protocol template is empty"));
+    }
+    if template.len() > MAX_DECODED_TEMPLATE_BYTES {
+        return Err(Error::invalid(
+            "decoded protocol template exceeds the limit",
+        ));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(template))
+}
+
+/// Decode a device template's base64 after enforcing the template limit.
+///
+/// Bounded far below the frame limit on purpose: a template is a reference the sensor hands back,
+/// not an image, so anything approaching frame size is a malformed or hostile line.
+pub fn decode_template_data(template_base64: &str) -> Result<Vec<u8>> {
+    let estimated = template_base64
+        .len()
+        .checked_add(3)
+        .and_then(|length| length.checked_div(4))
+        .and_then(|blocks| blocks.checked_mul(3))
+        .ok_or_else(|| Error::invalid("base64 template size overflow"))?;
+    if estimated > MAX_DECODED_TEMPLATE_BYTES + 2 {
+        return Err(Error::invalid(
+            "decoded protocol template exceeds the limit",
+        ));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(template_base64)
+        .map_err(|_| Error::invalid("protocol template contains invalid base64"))?;
+    if decoded.is_empty() {
+        return Err(Error::invalid("protocol template is empty"));
+    }
+    if decoded.len() > MAX_DECODED_TEMPLATE_BYTES {
+        return Err(Error::invalid(
+            "decoded protocol template exceeds the limit",
+        ));
+    }
+    Ok(decoded)
 }
 
 /// Encode one bounded request and append a JSON Lines newline.
@@ -293,6 +434,11 @@ fn validate_request(request: &Request) -> Result<()> {
             request_id,
             operation_id,
             device_id,
+        }
+        | Request::StartEnroll {
+            request_id,
+            operation_id,
+            device_id,
         } => {
             validate_identifier(request_id, "request ID")?;
             validate_identifier(operation_id, "operation ID")?;
@@ -302,6 +448,22 @@ fn validate_request(request: &Request) -> Result<()> {
                 ));
             }
             validate_identifier(device_id, "device ID")
+        }
+        Request::StartVerify {
+            request_id,
+            operation_id,
+            device_id,
+            template_base64,
+        } => {
+            validate_identifier(request_id, "request ID")?;
+            validate_identifier(operation_id, "operation ID")?;
+            if request_id == operation_id {
+                return Err(Error::invalid(
+                    "request ID and operation ID must be distinct",
+                ));
+            }
+            validate_identifier(device_id, "device ID")?;
+            decode_template_data(template_base64).map(|_| ())
         }
         Request::Cancel {
             request_id,
@@ -344,6 +506,34 @@ fn validate_response(response: &Response) -> Result<()> {
         | Response::FingerRemoved { operation_id }
         | Response::Completed { operation_id } => {
             validate_identifier(operation_id, "operation ID")?;
+        }
+        Response::MatchResult {
+            operation_id,
+            matched: _,
+        } => {
+            validate_identifier(operation_id, "operation ID")?;
+        }
+        Response::EnrollProgress {
+            operation_id,
+            completed_stages,
+            total_stages,
+        } => {
+            validate_identifier(operation_id, "operation ID")?;
+            if *total_stages == 0 {
+                return Err(Error::invalid("enrollment declares no stages"));
+            }
+            // `completed <= total` only. Requiring the last stage to be reported would reject
+            // honest drivers: upekts finishes a 3-stage enrollment having reported two.
+            if *completed_stages == 0 || completed_stages > total_stages {
+                return Err(Error::invalid("enrollment stage count is out of range"));
+            }
+        }
+        Response::Enrolled {
+            operation_id,
+            template_base64,
+        } => {
+            validate_identifier(operation_id, "operation ID")?;
+            decode_template_data(template_base64)?;
         }
         Response::Frame {
             operation_id,
@@ -418,12 +608,24 @@ enum SessionState {
     AwaitStarted {
         request_id: String,
         operation_id: String,
+        kind: OperationKind,
     },
     Capturing {
         operation_id: String,
         finger_present: bool,
         saw_frame: bool,
         last_sequence: Option<u64>,
+    },
+    Enrolling {
+        operation_id: String,
+        last_completed: Option<u32>,
+        /// Set once the template arrives; only then may the operation complete.
+        enrolled: bool,
+    },
+    Verifying {
+        operation_id: String,
+        /// Set once the device reports a verdict; only then may the operation complete.
+        reported: bool,
     },
     AwaitCancelled {
         request_id: String,
@@ -503,10 +705,23 @@ impl SessionValidator {
                     request_id,
                     operation_id,
                     ..
+                }
+                | Request::StartEnroll {
+                    request_id,
+                    operation_id,
+                    ..
+                }
+                | Request::StartVerify {
+                    request_id,
+                    operation_id,
+                    ..
                 },
             ) => SessionState::AwaitStarted {
                 request_id: request_id.clone(),
                 operation_id: operation_id.clone(),
+                kind: request
+                    .starts()
+                    .ok_or_else(|| Error::invalid("request does not start an operation"))?,
             },
             (SessionState::Ready, Request::Shutdown { .. }) => SessionState::Closed,
             (SessionState::Ready, Request::Cancel { .. }) => {
@@ -516,7 +731,9 @@ impl SessionValidator {
                 return Err(Error::invalid("hello may only be sent once"));
             }
             (
-                SessionState::Capturing { operation_id, .. },
+                SessionState::Capturing { operation_id, .. }
+                | SessionState::Enrolling { operation_id, .. }
+                | SessionState::Verifying { operation_id, .. },
                 Request::Cancel {
                     request_id,
                     operation_id: cancel_operation,
@@ -533,10 +750,15 @@ impl SessionValidator {
                 }
             }
             (
-                SessionState::Capturing { .. } | SessionState::AwaitStarted { .. },
-                Request::StartCapture { .. },
+                SessionState::Capturing { .. }
+                | SessionState::Enrolling { .. }
+                | SessionState::Verifying { .. }
+                | SessionState::AwaitStarted { .. },
+                Request::StartCapture { .. }
+                | Request::StartEnroll { .. }
+                | Request::StartVerify { .. },
             ) => {
-                return Err(Error::invalid("a capture operation is already active"));
+                return Err(Error::invalid("an operation is already active"));
             }
             (SessionState::Closed, _) => {
                 return Err(Error::invalid("protocol session is closed"));
@@ -598,6 +820,7 @@ impl SessionValidator {
                 SessionState::AwaitStarted {
                     request_id,
                     operation_id,
+                    kind,
                 },
                 Response::Started {
                     request_id: started_request,
@@ -607,13 +830,117 @@ impl SessionValidator {
                 if request_id != *started_request || operation_id != *started_operation {
                     return Err(Error::invalid("started event identifiers do not match"));
                 }
-                SessionState::Capturing {
-                    operation_id,
-                    finger_present: false,
-                    saw_frame: false,
-                    last_sequence: None,
+                // The request that opened the operation decides which events may follow. A
+                // match-on-chip driver cannot answer with frames, and a capture driver cannot
+                // answer with a verdict.
+                match kind {
+                    OperationKind::Capture => SessionState::Capturing {
+                        operation_id,
+                        finger_present: false,
+                        saw_frame: false,
+                        last_sequence: None,
+                    },
+                    OperationKind::Enroll => SessionState::Enrolling {
+                        operation_id,
+                        last_completed: None,
+                        enrolled: false,
+                    },
+                    OperationKind::Verify => SessionState::Verifying {
+                        operation_id,
+                        reported: false,
+                    },
                 }
             }
+            (
+                SessionState::Enrolling {
+                    operation_id,
+                    last_completed,
+                    enrolled,
+                },
+                Response::EnrollProgress {
+                    operation_id: event_operation,
+                    completed_stages,
+                    ..
+                },
+            ) if operation_id == *event_operation => {
+                if enrolled {
+                    return Err(Error::invalid(
+                        "enrollment progress after the template was delivered",
+                    ));
+                }
+                if last_completed.is_some_and(|last| *completed_stages <= last) {
+                    return Err(Error::invalid(
+                        "enrollment stage count must increase monotonically",
+                    ));
+                }
+                SessionState::Enrolling {
+                    operation_id,
+                    last_completed: Some(*completed_stages),
+                    enrolled: false,
+                }
+            }
+            (
+                SessionState::Enrolling {
+                    operation_id,
+                    last_completed,
+                    enrolled: false,
+                },
+                Response::Enrolled {
+                    operation_id: event_operation,
+                    ..
+                },
+            ) if operation_id == *event_operation => SessionState::Enrolling {
+                operation_id,
+                last_completed,
+                enrolled: true,
+            },
+            (
+                SessionState::Enrolling {
+                    operation_id,
+                    enrolled: true,
+                    ..
+                },
+                Response::Completed {
+                    operation_id: event_operation,
+                },
+            ) if operation_id == *event_operation => SessionState::Ready,
+            (
+                SessionState::Verifying {
+                    operation_id,
+                    reported: false,
+                },
+                Response::MatchResult {
+                    operation_id: event_operation,
+                    ..
+                },
+            ) if operation_id == *event_operation => SessionState::Verifying {
+                operation_id,
+                reported: true,
+            },
+            (
+                SessionState::Verifying {
+                    operation_id,
+                    reported,
+                },
+                Response::FingerPresent {
+                    operation_id: event_operation,
+                }
+                | Response::FingerRemoved {
+                    operation_id: event_operation,
+                },
+            ) if operation_id == *event_operation => SessionState::Verifying {
+                operation_id,
+                reported,
+            },
+            (
+                SessionState::Verifying {
+                    operation_id,
+                    reported: true,
+                },
+                Response::Completed {
+                    operation_id: event_operation,
+                },
+            ) if operation_id == *event_operation => SessionState::Ready,
             (
                 SessionState::Capturing {
                     operation_id,
@@ -732,6 +1059,7 @@ impl SessionValidator {
             SessionState::AwaitStarted {
                 request_id,
                 operation_id,
+                ..
             } if response_request_id.as_deref() == Some(request_id.as_str())
                 && response_operation_id
                     .as_deref()
@@ -740,6 +1068,8 @@ impl SessionValidator {
                 SessionState::Ready
             }
             SessionState::Capturing { operation_id, .. }
+            | SessionState::Enrolling { operation_id, .. }
+            | SessionState::Verifying { operation_id, .. }
                 if response_request_id.is_none()
                     && response_operation_id.as_deref() == Some(operation_id.as_str()) =>
             {
@@ -801,6 +1131,187 @@ mod tests {
         }
     }
 
+    /// A validator that has negotiated hello and is ready for a command.
+    fn ready() -> SessionValidator {
+        let mut validator = SessionValidator::new();
+        validator.accept_request(&hello()).unwrap();
+        validator.accept_response(&hello_ack()).unwrap();
+        validator
+    }
+
+    fn started(request_id: &str, operation_id: &str) -> Response {
+        Response::Started {
+            request_id: request_id.to_owned(),
+            operation_id: operation_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_enrollment_completes_without_reporting_its_final_stage() {
+        // The behaviour a real sensor taught us. upekts finishes a 3-stage enrollment having
+        // reported two, because the poll after the last presentation says "complete" rather than
+        // "one more". A validator that demanded 3 of 3 would reject an honest driver.
+        let mut validator = ready();
+        validator
+            .accept_request(&Request::StartEnroll {
+                request_id: "request-2".to_owned(),
+                operation_id: "operation-7".to_owned(),
+                device_id: "device-1".to_owned(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&started("request-2", "operation-7"))
+            .unwrap();
+        for completed in 1..=2 {
+            validator
+                .accept_response(&Response::EnrollProgress {
+                    operation_id: "operation-7".to_owned(),
+                    completed_stages: completed,
+                    total_stages: 3,
+                })
+                .unwrap();
+        }
+        validator
+            .accept_response(&Response::Enrolled {
+                operation_id: "operation-7".to_owned(),
+                template_base64: encode_template_data(&[7; 241]).unwrap(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&Response::Completed {
+                operation_id: "operation-7".to_owned(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn an_enrollment_cannot_complete_before_the_template_arrives() {
+        let mut validator = ready();
+        validator
+            .accept_request(&Request::StartEnroll {
+                request_id: "request-2".to_owned(),
+                operation_id: "operation-7".to_owned(),
+                device_id: "device-1".to_owned(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&started("request-2", "operation-7"))
+            .unwrap();
+        // Completion with no template would leave the host with nothing to store.
+        assert!(
+            validator
+                .accept_response(&Response::Completed {
+                    operation_id: "operation-7".to_owned(),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn enrollment_progress_must_advance_and_stop_at_the_template() {
+        let mut validator = ready();
+        validator
+            .accept_request(&Request::StartEnroll {
+                request_id: "request-2".to_owned(),
+                operation_id: "operation-7".to_owned(),
+                device_id: "device-1".to_owned(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&started("request-2", "operation-7"))
+            .unwrap();
+        let progress = |completed| Response::EnrollProgress {
+            operation_id: "operation-7".to_owned(),
+            completed_stages: completed,
+            total_stages: 3,
+        };
+        validator.accept_response(&progress(2)).unwrap();
+        assert!(validator.accept_response(&progress(2)).is_err());
+        assert!(validator.accept_response(&progress(1)).is_err());
+        // Out of range against the declared total.
+        assert!(validator.accept_response(&progress(4)).is_err());
+
+        validator
+            .accept_response(&Response::Enrolled {
+                operation_id: "operation-7".to_owned(),
+                template_base64: encode_template_data(&[7; 8]).unwrap(),
+            })
+            .unwrap();
+        assert!(validator.accept_response(&progress(3)).is_err());
+    }
+
+    #[test]
+    fn a_verification_runs_to_a_verdict_and_a_capture_cannot_produce_one() {
+        let mut validator = ready();
+        validator
+            .accept_request(&Request::StartVerify {
+                request_id: "request-2".to_owned(),
+                operation_id: "operation-7".to_owned(),
+                device_id: "device-1".to_owned(),
+                template_base64: encode_template_data(&[7; 241]).unwrap(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&started("request-2", "operation-7"))
+            .unwrap();
+        validator
+            .accept_response(&Response::FingerPresent {
+                operation_id: "operation-7".to_owned(),
+            })
+            .unwrap();
+        validator
+            .accept_response(&Response::MatchResult {
+                operation_id: "operation-7".to_owned(),
+                matched: true,
+            })
+            .unwrap();
+        validator
+            .accept_response(&Response::Completed {
+                operation_id: "operation-7".to_owned(),
+            })
+            .unwrap();
+
+        // The operation that was opened decides the events that may follow: a capture cannot
+        // answer with a verdict, and an enrollment cannot answer with a frame.
+        let mut validator = ready();
+        validator.accept_request(&start()).unwrap();
+        validator
+            .accept_response(&started("request-2", "operation-7"))
+            .unwrap();
+        assert!(
+            validator
+                .accept_response(&Response::MatchResult {
+                    operation_id: "operation-7".to_owned(),
+                    matched: true,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn template_payloads_are_bounded_and_never_empty() {
+        assert!(encode_template_data(&[]).is_err());
+        assert!(encode_template_data(&vec![0; MAX_DECODED_TEMPLATE_BYTES + 1]).is_err());
+        assert!(decode_template_data("").is_err());
+        assert!(decode_template_data("***").is_err());
+
+        let boundary = vec![9_u8; MAX_DECODED_TEMPLATE_BYTES];
+        let encoded = encode_template_data(&boundary).unwrap();
+        assert_eq!(decode_template_data(&encoded).unwrap(), boundary);
+
+        // A start-verify carrying an unusable template is refused at the codec, before any
+        // device is asked to compare against it.
+        assert!(
+            encode_request(&Request::StartVerify {
+                request_id: "r".to_owned(),
+                operation_id: "o".to_owned(),
+                device_id: "d".to_owned(),
+                template_base64: String::new(),
+            })
+            .is_err()
+        );
+    }
+
     #[test]
     fn golden_json_lines_are_stable() {
         let requests = vec![
@@ -859,9 +1370,11 @@ mod tests {
                     devices: vec![DeviceInfo {
                         device_id: "d1".to_owned(),
                         capture_profile_id: "profile1".to_owned(),
+                        capability: DeviceCapability::HostImage,
+                        enroll_stages: 0,
                     }],
                 },
-                "{\"type\":\"devices\",\"request_id\":\"r2\",\"devices\":[{\"device_id\":\"d1\",\"capture_profile_id\":\"profile1\"}]}\n",
+                "{\"type\":\"devices\",\"request_id\":\"r2\",\"devices\":[{\"device_id\":\"d1\",\"capture_profile_id\":\"profile1\",\"capability\":\"host_image\",\"enroll_stages\":0}]}\n",
             ),
             (
                 Response::Started {

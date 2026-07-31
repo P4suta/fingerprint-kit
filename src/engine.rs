@@ -1,6 +1,6 @@
 use crate::{
-    CanonicalImage, CaptureMetadata, Error, MinutiaRecord, Result, TemplateRecord, TemplateSample,
-    VerificationResult,
+    CanonicalImage, CaptureMetadata, Error, HostImageTemplate, MinutiaRecord, Result,
+    TemplateRecord, TemplateSample, VerificationResult,
 };
 use std::path::PathBuf;
 
@@ -12,6 +12,15 @@ pub const MIN_MEAN_MINUTIA_QUALITY: u8 = 25;
 pub const ACCEPT_THRESHOLD: u32 = 40;
 /// Fixed, explicitly experimental matching policy name.
 pub const POLICY_NAME: &str = "experimental-nbis-40-v1";
+/// Policy name for templates whose matching happens on the sensor.
+///
+/// Distinct from [`POLICY_NAME`] because it describes a different thing entirely: not a threshold
+/// this build applies, but the fact that this build applies none. The sensor owns the decision.
+/// Keeping the names disjoint is what makes a template validated under one policy fail closed
+/// under the other.
+pub const DEVICE_POLICY_NAME: &str = "device-match-v1";
+/// Template schema major version written by this build.
+pub const TEMPLATE_SCHEMA_MAJOR: u32 = 2;
 /// Engine identifier persisted in version-1 templates.
 pub const ENGINE_ID: &str = "nbis-mindtct-bozorth3";
 /// Engine version persisted in version-1 templates.
@@ -69,24 +78,32 @@ pub(crate) fn enroll_paths(captures: &[PathBuf]) -> Result<TemplateRecord> {
         samples.push(analyze(&image, &metadata)?.sample);
     }
 
-    Ok(TemplateRecord {
-        schema_major: 1,
+    Ok(TemplateRecord::HostImage(HostImageTemplate {
+        schema_major: TEMPLATE_SCHEMA_MAJOR,
         engine_id: ENGINE_ID.to_owned(),
         engine_version: ENGINE_VERSION.to_owned(),
         capture_profile_id: profile
             .ok_or_else(|| Error::processing("enrollment profile is unavailable"))?,
         policy: POLICY_NAME.to_owned(),
         samples,
-    })
+    }))
 }
 
 /// Verify one canonical probe against all enrollment samples, taking the maximum score.
+///
+/// Host-image only. A [`TemplateRecord::MatchOnChip`] is rejected rather than coerced: its blob
+/// carries no minutiae to score, and there is no threshold this build could apply to it.
 pub fn verify(
     template: &TemplateRecord,
     image: &CanonicalImage,
     metadata: &CaptureMetadata,
 ) -> Result<VerificationResult> {
     crate::template::validate_template(template)?;
+    let TemplateRecord::HostImage(template) = template else {
+        return Err(Error::invalid(
+            "this template matches on the sensor; verify it against the device that made it",
+        ));
+    };
     if template.capture_profile_id != metadata.capture_profile_id {
         return Err(Error::invalid(
             "probe capture profile does not match the template",
@@ -277,8 +294,8 @@ mod tests {
     #[test]
     fn fixed_fixture_genuine_matches_and_impostor_does_not() {
         let (_, metadata) = generate_synthetic(41, 0).unwrap();
-        let mut template = TemplateRecord {
-            schema_major: 1,
+        let mut inner = HostImageTemplate {
+            schema_major: TEMPLATE_SCHEMA_MAJOR,
             engine_id: ENGINE_ID.to_owned(),
             engine_version: ENGINE_VERSION.to_owned(),
             capture_profile_id: metadata.capture_profile_id.clone(),
@@ -287,10 +304,11 @@ mod tests {
         };
         for impression in 0..ENROLLMENT_SAMPLES {
             let (image, sample_metadata) = generate_synthetic(41, impression as u64).unwrap();
-            template
+            inner
                 .samples
                 .push(analyze(&image, &sample_metadata).unwrap().sample);
         }
+        let template = TemplateRecord::HostImage(inner);
         let (genuine_image, genuine_metadata) = generate_synthetic(41, 90).unwrap();
         let genuine = verify(&template, &genuine_image, &genuine_metadata).unwrap();
         let (impostor_image, impostor_metadata) = generate_synthetic(99, 0).unwrap();
