@@ -1,0 +1,23 @@
+[package]
+name = "fingerprint-kit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Hardware-free experimental fingerprint pipeline"
+repository = "https://github.com/P4suta/fingerprint-kit"
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.5.48", features = ["derive"] }
+fprint-bozorth3 = "=0.1.0"
+fprint-mindtct = "=0.1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tempfile = "3.23.0"
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

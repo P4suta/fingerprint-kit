@@ -1,0 +1,11 @@
+/target/
+
+# Outputs created by the README's manual round trip.
+/capture-*/
+/probe/
+/template.json
+
+# Local environment files may contain secrets.
+/.env
+/.env.*
+!/.env.example
