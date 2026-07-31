@@ -1,0 +1,35 @@
+# A driver worker, not a library. It is a separate process that speaks the `fingerprint-kit`
+# JSON Lines protocol on stdio and delegates to libfprint through the published
+# `fprint-backend-libfprint` shim.
+#
+# Why a separate crate and a separate *process*: libfprint is LGPL and reached over FFI, and the
+# shim is `!Send` and full of C lifetimes. Keeping it here means the root crate keeps
+# `forbid(unsafe_code)`, keeps its permissive licence uncomplicated, and depends on none of it.
+# Replacing this worker with a native Rust driver later changes nothing above the protocol.
+[package]
+name = "fpk-driver-libfprint"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "libfprint-backed match-on-chip driver worker for fingerprint-kit"
+repository = "https://github.com/P4suta/fingerprint-kit"
+
+[dependencies]
+# The protocol types and codecs. This is the only thing the worker shares with the host.
+fingerprint-kit = { path = "../.." }
+# The hardware-verified libfprint shim, from crates.io.
+fprint-backend-libfprint = "0.1"
+fprint-core = "0.1"
+# The template wire format. FP3 round-trips a whole `Print`, which is what libfprint needs back
+# at verification time — the raw device bytes alone would lose the identity it checks first.
+fprint-fp3 = "0.1"
+# Drives the shim's `async fn` operations to completion on this thread; no runtime.
+pollster = "0.4"
+
+[lints.rust]
+# Not `forbid`: the FFI boundary lives below us in the shim, but this crate is where a future
+# native driver's `unsafe` would land, and denying rather than forbidding lets that be a reviewed
+# exception instead of an unbuildable one.
+unsafe_code = "deny"

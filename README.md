@@ -15,9 +15,66 @@ libfprint, or fprintd. It does not support real devices, OS login, or production
 The policy `experimental-nbis-40-v1` is an uncalibrated engineering fixture; it makes no FMR, FNMR,
 or PAD claim.
 
-A driver/process boundary, match-on-chip (MOC), a secure template store, and PAM/D-Bus adapters are
-separate future milestones. FP3 import is outside M0, as are firmware, real USB/SPI/HID transport,
-hotplug, persistent credentials, and desktop integration.
+A secure template store and PAM/D-Bus adapters are separate future milestones. FP3 import is
+outside M0, as are firmware, real USB/SPI/HID transport, hotplug, persistent credentials, and
+desktop integration.
+
+## Match-on-chip
+
+M1 adds the second sensor archetype. A match-on-chip device keeps the matcher: the host never sees
+a finger, receives an opaque template it cannot read, and hands that template back at verification
+time for the sensor to compare against a live scan. The trust boundary is inverted, so the API is
+too — [`MatchOnChipDevice`](src/moc.rs) has an enrollment that yields a blob and a verification that
+yields a verdict, with no image, no minutiae, no score, and no threshold.
+
+The two archetypes are kept unrepresentable in each other's terms. A template is stored under an
+explicit `kind` discriminant (`host_image` or `match_on_chip`), the policies are disjoint
+(`experimental-nbis-40-v1` against `device-match-v1`), and each fails closed when handed to the
+other's path. Templates are schema version 2; a version-1 file no longer loads, because v1 had no
+`kind` and guessing one would be the opposite of failing closed.
+
+**Enrollment progress is not a countdown.** A driver need not report its final stage: libfprint's
+`upekts` reports a stage only once the *following* poll asks for another presentation, so the poll
+after the last presentation says "complete" and reports nothing — a 3-stage enrollment emits two
+progress events. This was measured on a UPEK TouchStrip, not inferred. Treat the template's arrival
+as the completion signal; waiting for `completed == total` hangs.
+
+The `protocol` module carries the matching messages (`StartEnroll`, `StartVerify`, `EnrollProgress`,
+`Enrolled`, `MatchResult`), and `SessionValidator` enforces that the operation a session opened is
+the only one whose events it will accept.
+
+### Drivers run in their own process
+
+A device is reached through a **driver worker**: a separate program that speaks the protocol on
+stdio. [`WorkerDevice`](src/worker.rs) spawns one and presents it as an ordinary
+`MatchOnChipDevice`, so nothing above that module knows the device is in another process.
+
+This is what lets the root crate stay `forbid(unsafe_code)`, permissively licensed, and free of
+any device dependency while still driving real hardware. `crates/fpk-driver-libfprint` is the
+first worker: it delegates to libfprint through the published `fprint-backend-libfprint` shim, and
+because it is a separate *process*, none of that — the FFI, the `unsafe`, the LGPL — crosses into
+the core. Replacing it with a native Rust driver later changes nothing above the pipe.
+
+```console
+cargo build --workspace
+fingerprint-kit enroll-device --out template.json --driver ./target/debug/fpk-driver-libfprint
+fingerprint-kit verify-device --template template.json --driver ./target/debug/fpk-driver-libfprint
+```
+
+`verify-device` exits 0 for a match and 1 for a non-match, like `verify`.
+
+### Hardware status
+
+The match-on-chip path has been run **on one real sensor**: a UPEK TouchStrip (`0483:2016`,
+libfprint driver `upekts`), enrolled and verified end to end through the CLI, the worker protocol,
+and libfprint 1.94.10, with a non-matching finger correctly rejected. `docker/` holds the
+container that did it; `docker/bringup.sh` is the script.
+
+Nothing else is hardware-verified. The host-image path has still never seen a sensor — there is no
+`CaptureSource` that reads from one — and one device does not generalize to a second driver, let
+alone to the other archetype. Note also that libfprint before **1.94.9** cannot verify on this
+sensor at all (`upekts` verify is broken; fixed upstream by `cdc22b45`), which is why the container
+builds libfprint from source rather than using a distribution package.
 
 ## Quick start
 

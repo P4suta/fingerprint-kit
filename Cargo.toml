@@ -1,3 +1,10 @@
+# The root crate stays the whole product for anyone without hardware. Drivers live in `crates/`
+# as separate binaries, never as dependencies of this one: a driver links whatever its device
+# needs — C libraries, `unsafe`, other licences — and the JSON Lines protocol is what keeps all of
+# that on the far side of a process boundary. See `crates/fpk-driver-libfprint`.
+[workspace]
+members = ["crates/fpk-driver-libfprint"]
+
 [package]
 name = "fingerprint-kit"
 version = "0.1.0"

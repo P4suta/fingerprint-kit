@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The container the libfprint-backed driver worker is built and run in.
+#
+# The root crate needs none of this — it builds and tests anywhere, with no hardware. Only
+# `crates/fpk-driver-libfprint` needs a libfprint to link against, a driver for the attached
+# sensor, and the USB bus. That asymmetry is the point of the process boundary.
+#
+# The image is `fprintd-hw`, built by the sibling fprintd project
+# (`mise run docker-hw-build` there). It carries a libfprint built from source with a hardware
+# driver, plus the glib/clang toolchain `fprint-backend-libfprint`'s bindgen needs. Reusing it
+# rather than duplicating the recipe keeps one definition of "a libfprint that can drive this
+# sensor" — and the distro's own libfprint is too old for the UPEK TouchStrip anyway (verify is
+# broken before 1.94.9).
+#
+#   docker compose -f docker/docker-compose.hw.yml run --rm hw cargo build -p fpk-driver-libfprint
+#
+# Templates enrolled from a real finger must not land in the working tree: run anything that
+# writes one with `-w /run/bringup`, which dies with the container. See SECURITY.md.
+
+services:
+  hw:
+    image: fprintd-hw
+    working_dir: /work
+    volumes:
+      - ..:/work
+      - fpk-target:/work/target
+      - fpk-cargo-registry:/cargo/registry
+      # The USB bus. A bind mount rather than `devices:` because a sensor that re-enumerates
+      # gets a new device node, and `devices:` pins the one that existed at container start.
+      - /dev/bus/usb:/dev/bus/usb
+    # Makes the bound nodes usable, not merely visible. 189 is usbfs.
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+    environment:
+      CARGO_HOME: /cargo
+      # Quiet by default: libfprint's driver trace is ~1000 lines per operation and buries the
+      # protocol exchange. Set G_MESSAGES_DEBUG=all when diagnosing a stalled transfer.
+      G_MESSAGES_DEBUG: ''
+    command: ["bash"]
+
+volumes:
+  fpk-target:
+  fpk-cargo-registry:

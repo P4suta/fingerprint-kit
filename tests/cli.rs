@@ -15,6 +15,52 @@ fn path_text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+/// A match-on-chip template, hand-written as JSON so the on-disk format is exercised from
+/// outside the crate rather than through its own constructors.
+const DEVICE_TEMPLATE_JSON: &str = r#"{
+  "kind": "match_on_chip",
+  "schema_major": 2,
+  "driver_id": "upekts",
+  "device_profile_id": "upek-touchstrip",
+  "policy": "device-match-v1",
+  "blob_base64": "AAECAwQFBgcICQoLDA0ODw=="
+}"#;
+
+#[test]
+fn a_device_template_cannot_be_verified_against_a_capture() {
+    // The two kinds answer different questions, and the CLI must say so rather than produce a
+    // score for a template that has no minutiae to score.
+    let temp = tempdir().unwrap();
+    let template = temp.path().join("device-template.json");
+    std::fs::write(&template, DEVICE_TEMPLATE_JSON).unwrap();
+
+    let capture = temp.path().join("capture");
+    let synthetic = run(&[
+        "synthetic",
+        "--identity",
+        "41",
+        "--impression",
+        "0",
+        "--out",
+        path_text(&capture),
+    ]);
+    assert!(synthetic.status.success(), "{synthetic:?}");
+
+    let verify = run(&[
+        "verify",
+        "--template",
+        path_text(&template),
+        path_text(&capture),
+    ]);
+    // Exit 2 is "invalid input", not 1 "no match": this is a category error, not a rejection.
+    assert_eq!(verify.status.code(), Some(2), "{verify:?}");
+    let message = String::from_utf8(verify.stderr).unwrap();
+    assert!(
+        message.contains("matches on the sensor"),
+        "unhelpful error: {message}"
+    );
+}
+
 #[test]
 fn synthetic_inspect_enroll_and_verify_round_trip() {
     let temp = tempdir().unwrap();
