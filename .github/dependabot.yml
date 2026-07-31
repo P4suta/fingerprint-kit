@@ -3,11 +3,26 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Tokyo
+    target-branch: main
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - rust
     groups:
-      rust-dependencies:
+      rust-non-major:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
     ignore:
       - dependency-name: "*"
         update-types:
@@ -16,11 +31,20 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Asia/Tokyo
+    target-branch: main
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - github_actions
     groups:
       github-actions:
         patterns:
           - "*"
-    ignore:
-      # Keep this aligned with rust-toolchain.toml and the documented MSRV.
-      - dependency-name: dtolnay/rust-toolchain

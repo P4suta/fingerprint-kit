@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/P4suta/fingerprint-kit/security/advisories/new
+    about: Report vulnerabilities and sensitive reproduction details privately.
+  - name: Security and support policy
+    url: https://github.com/P4suta/fingerprint-kit/blob/main/SECURITY.md
+    about: Review the project's experimental scope and security boundaries.
