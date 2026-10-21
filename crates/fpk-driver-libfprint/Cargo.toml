@@ -26,7 +26,7 @@ fprint-core = "0.1"
 # at verification time — the raw device bytes alone would lose the identity it checks first.
 fprint-fp3 = "0.1"
 # Drives the shim's `async fn` operations to completion on this thread; no runtime.
-pollster = "0.4"
+pollster = "1.0"
 
 [lints.rust]
 # Not `forbid`: the FFI boundary lives below us in the shim, but this crate is where a future
