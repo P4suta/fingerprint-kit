@@ -1,11 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
+  merge_group:
 
 permissions:
   contents: read
@@ -18,8 +16,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changes
+        with:
+          base: >-
+            ${{ github.event.merge_group.base_sha ||
+            github.event.repository.default_branch }}
+          filters: .github/filters/ci.yml
+      - name: Validate selection
+        env:
+          CODE_FILTER: ${{ steps.changes.outputs.code }}
+        run: jq -en --arg code "$CODE_FILTER" '$code == "true" or $code == "false"'
+      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+        with:
+          version: v2026.10.13
+          sha256: 94c45523c7b6760b7da704f16051171ca32e8447a849a02266a439a4455e9a12
+          install_args: actionlint
+      - run: mise x -- actionlint
+
   m0:
     name: CI (${{ matrix.os }})
+    needs: [quality]
+    if: needs.quality.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +63,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+        run: cargo --version
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
@@ -46,20 +77,25 @@ jobs:
       - name: Acceptance demo
         run: cargo run --locked -- demo
 
-  # The one status check branch protection requires,
-  # named the same in every P4suta repository.
-  # It passes only when every job it needs succeeded or was skipped.
   required:
     name: required
     if: always()
-    needs: [m0]
-    runs-on: ubuntu-latest
+    needs: [quality, m0]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Fail unless every needed job succeeded or was skipped
+      - name: Require the selected work
         env:
-          RESULTS: ${{ toJSON(needs.*.result) }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          echo "${RESULTS}"
-          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"
+          jq -en --argjson needs "$NEEDS" '
+            $needs |
+            (keys == ["m0", "quality"]) and
+            (.quality.result == "success") and
+            (.quality.outputs.code | IN("true", "false")) and
+            (.m0.result == (
+              if .quality.outputs.code == "true" then "success"
+              else "skipped" end
+            ))
+          '
