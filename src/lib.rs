@@ -93,20 +93,24 @@ pub fn create_synthetic_bundle(identity: u64, impression: u64, out: &Path) -> Re
 
 /// Run the complete hardware-free M0 vertical slice in a temporary directory.
 pub fn run_demo() -> Result<(VerificationResult, VerificationResult)> {
+    const ENROLLED_IDENTITY: u64 = 41;
+    const IMPOSTOR_IDENTITY: u64 = 99;
+    const PROBE_IMPRESSION: u64 = 90;
+
     let temp = tempfile::tempdir().map_err(Error::io)?;
     let enrollment: Vec<PathBuf> = (0..ENROLLMENT_SAMPLES)
         .map(|index| temp.path().join(format!("enroll-{index}")))
         .collect();
 
     for (index, path) in enrollment.iter().enumerate() {
-        create_synthetic_bundle(41, index as u64, path)?;
+        create_synthetic_bundle(ENROLLED_IDENTITY, index as u64, path)?;
     }
 
     let genuine_path = temp.path().join("genuine");
     let impostor_path = temp.path().join("impostor");
     let template_path = temp.path().join("template.json");
-    create_synthetic_bundle(41, 90, &genuine_path)?;
-    create_synthetic_bundle(99, 0, &impostor_path)?;
+    create_synthetic_bundle(ENROLLED_IDENTITY, PROBE_IMPRESSION, &genuine_path)?;
+    create_synthetic_bundle(IMPOSTOR_IDENTITY, 0, &impostor_path)?;
     enroll_bundles(&enrollment, &template_path)?;
 
     let genuine = verify_bundle(&template_path, &genuine_path)?;
