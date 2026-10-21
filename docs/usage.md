@@ -71,3 +71,5 @@ cargo run --locked -- demo
 Set RUSTDOCFLAGS to `-D warnings` when checking documentation.
 Run `mise x -- actionlint` to validate the workflows.
 CI runs the native checks for source inputs and keeps documentation changes on the fast workflow gate.
+If the repository uses an Actions allowlist, permit `dorny/paths-filter` and `jdx/mise-action`.
+Require full commit references so Renovate can update their pins through verified pull requests.
