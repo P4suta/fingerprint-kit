@@ -1,12 +1,14 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "17 3 * * 4"
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/codeql.yml'
   workflow_dispatch:
 
 permissions:

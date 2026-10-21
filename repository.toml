@@ -1,0 +1,17 @@
+name = "fingerprint-kit"
+summary = "Experimental fingerprint enrollment and verification in Rust"
+install = """
+git clone https://github.com/P4suta/fingerprint-kit.git
+cd fingerprint-kit
+cargo build --locked --release
+"""
+usage = """
+cargo run --locked --release -- demo
+"""
+documentation_index = true
+copyright = "2026 P4suta"
+license = "MIT OR Apache-2.0"
+
+[[consent]]
+contributor = "Yasunobu"
+evidence = "https://github.com/P4suta/fingerprint-kit/commit/39a8ecaed5c6f9e891f264ed26f40c410c383d67"

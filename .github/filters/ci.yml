@@ -1,0 +1,8 @@
+code:
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'rust-toolchain.toml'
+  - 'mise.toml'
+  - '.github/filters/ci.yml'
+  - '.github/workflows/ci.yml'
