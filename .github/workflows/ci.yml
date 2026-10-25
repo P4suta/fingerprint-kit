@@ -40,10 +40,10 @@ jobs:
         env:
           CODE_FILTER: ${{ steps.changes.outputs.code }}
         run: jq -en --arg code "$CODE_FILTER" '$code == "true" or $code == "false"'
-      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: v2026.10.13
-          sha256: 94c45523c7b6760b7da704f16051171ca32e8447a849a02266a439a4455e9a12
+          version: v2026.10.17
+          sha256: fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a
           install_args: actionlint
       - run: mise x -- actionlint
 
